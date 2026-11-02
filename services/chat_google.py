@@ -1,8 +1,11 @@
 from datetime import date, datetime
 from decimal import Decimal
+from functools import wraps
 import json
 import logging
+import os
 from pathlib import Path
+from time import perf_counter
 from uuid import UUID
 
 import pymupdf4llm
@@ -29,14 +32,14 @@ def carregar_manual(caminho: str | Path) -> str:
     arquivo = Path(caminho).expanduser()
     if not arquivo.is_file():
         raise FileNotFoundError(f'Manual não encontrado: {arquivo}')
-    conteudo = pymupdf4llm.to_markdown(str(arquivo))
+    conteudo = pymupdf4llm.to_markdown(str(arquivo),use_ocr=False,)
     if not isinstance(conteudo, str) or not conteudo.strip():
         raise ValueError('O manual não gerou Markdown válido. Verifique o PDF e o OCR.')
     return conteudo.strip()
 
 
 def create_tools(db: PostgresService, customer_id: int | None = None,
-                 manual_text: str = '') -> list:
+                 manual_text: str = '', tool_events: list | None = None) -> list:
     """customer_id deve vir da autenticação do backend, nunca da mensagem/LLM.
 
     Sem identidade, consultas de clientes e pedidos retornam erro de autorização.
@@ -158,9 +161,34 @@ def create_tools(db: PostgresService, customer_id: int | None = None,
         return {'fonte': 'manual_da_loja', 'formato': 'markdown',
                 'conteudo': manual_text}
 
-    return [consultar_categorias, consultar_produtos, consultar_promocoes,
-            consultar_cliente, consultar_pedidos, consultar_itens_pedido,
-            consultar_manual_loja]
+    def instrument(tool):
+        @wraps(tool)
+        def tracked(*args, **kwargs):
+            start = perf_counter()
+            event = {'name': tool.__name__, 'status': 'running'}
+            if tool_events is not None:
+                tool_events.append(event)
+            try:
+                result = tool(*args, **kwargs)
+                event['status'] = 'error' if isinstance(result, dict) and 'erro' in result else 'success'
+                if isinstance(result, dict) and isinstance(result.get('registros'), list):
+                    event['rows'] = len(result['registros'])
+                return result
+            except Exception:
+                event['status'] = 'error'
+                raise
+            finally:
+                event['duration_ms'] = round((perf_counter() - start) * 1000, 2)
+                logger.info('tool=%s status=%s duration_ms=%s rows=%s',
+                            event['name'], event['status'], event['duration_ms'],
+                            event.get('rows', '-'))
+        return tracked
+
+    return [instrument(tool) for tool in (
+        consultar_categorias, consultar_produtos, consultar_promocoes,
+        consultar_cliente, consultar_pedidos, consultar_itens_pedido,
+        consultar_manual_loja,
+    )]
 
 
 class ChatGoogle:
@@ -190,9 +218,14 @@ class ChatGoogle:
              inicio: datetime | None = None, fim: datetime | None = None) -> dict:
         """Retorna session_id, message e status; saved indica persistência confirmada."""
         
-        state = {'session_id': session_id, 'phase': 'input'}
+        start = perf_counter()
+        state = {'session_id': session_id, 'phase': 'input', 'tools': []}
         try:
-            return self._chat(message, session_id, title, customer_id, inicio, fim, state)
+            result = self._chat(message, session_id, title, customer_id, inicio, fim, state)
+            result['tools'] = state['tools']
+            result['records'] = sum(event.get('rows', 0) for event in state['tools'])
+            result['duration_ms'] = round((perf_counter() - start) * 1000, 2)
+            return result
         except errors.APIError as exc:
             code = str(exc.code)
             if code == '429':
@@ -224,7 +257,9 @@ class ChatGoogle:
                 
         logger.warning('Chat interrompido: status=%s phase=%s', status, state['phase'])
         return {'session_id': state['session_id'], 'message': text,
-                'status': status, 'saved': False}
+                'status': status, 'saved': False, 'tools': state['tools'],
+                'records': sum(event.get('rows', 0) for event in state['tools']),
+                'duration_ms': round((perf_counter() - start) * 1000, 2)}
 
     def _chat(self, message, session_id, title, customer_id, inicio, fim, state):
         if not isinstance(message, str) or not message.strip():
@@ -266,9 +301,9 @@ class ChatGoogle:
             model=self.model, history=history,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
-                tools=create_tools(self.db, customer_id, self.manual_text),
+                tools=create_tools(self.db, customer_id, self.manual_text, state['tools']),
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    maximum_remote_calls=5),
+                    maximum_remote_calls=10),
             ),
         )
         response = chat.send_message(message)
