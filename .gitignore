@@ -1,0 +1,46 @@
+# Ambiente virtual
+.venv/
+venv/
+env/
+
+# Cache e arquivos compilados do Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Build e distribuição
+build/
+dist/
+
+# Variáveis de ambiente e chaves de API
+.env
+.env.*
+!.env.example
+
+# Credenciais locais do Google
+/credentials.json
+/service-account*.json
+
+# Testes, cobertura e análise de código
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Configurações locais de IDE
+.idea/
+.vscode/
