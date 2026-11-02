@@ -17,7 +17,6 @@ def main() -> int:
         chat = ChatGoogle()
     except Exception as exc:
         print(f'Falha na inicialização ({type(exc).__name__}). Confira .env, PDF e dependências.')
-        print('Diagnóstico: uv run python chat_interation.py --check')
         return 1
     session_id = args.session_id
     print("Chat iniciado. Digite 'sair' para encerrar. Use Ctrl+C para interromper.")
